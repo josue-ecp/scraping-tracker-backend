@@ -12,8 +12,8 @@ return [
     'allowed_origins' => [
         'http://localhost:3002',
         'http://localhost:5173',
+        'https://scraping-tracker-frontend-git-main-josue-s-projects16.vercel.app',
     ],
-
     'allowed_origins_patterns' => [],
 
     'allowed_headers' => ['*'],

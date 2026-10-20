@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
+# Solucionar conflicto de MPM en Apache (Evita el error de múltiples MPM cargados)
+RUN a2dismod mpm_event mpm_worker && a2enmod mpm_prefork
+
 # Instalar extensiones PHP necesarias para Laravel
 RUN docker-php-ext-install \
     pdo_mysql \
@@ -43,3 +46,13 @@ RUN printf '<Directory /var/www/html/public>\n\
     && a2enconf laravel
 
 WORKDIR /var/www/html
+
+# Copiar el código del proyecto al contenedor
+COPY . /var/www/html
+
+# Instalar dependencias de Composer sin dev
+RUN composer install --no-dev --optimize-autoloader --no-interaction
+
+# Asignar permisos correctos a las carpetas de storage y bootstrap/cache
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
+    && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache

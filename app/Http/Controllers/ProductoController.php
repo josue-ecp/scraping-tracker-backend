@@ -551,6 +551,7 @@ class ProductoController extends Controller
                 'datos' => $datos,
                 'selectores' => $selectores,
                 'html' => $html,
+                'htmlPreview' => $scraper->sanitizeHtmlForPreview($html, $enlace),
                 'metadatos' => $scraper->metadata($html, $enlace),
             ]);
 

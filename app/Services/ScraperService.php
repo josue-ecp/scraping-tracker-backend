@@ -12,7 +12,7 @@ use RuntimeException;
 class ScraperService
 {
     private const MAX_HTML_BYTES = 5242880;
-    
+
     public function fetchHtml(string $url): Response
     {
         for ($redirectCount = 0; $redirectCount <= 5; $redirectCount++) {
@@ -155,6 +155,159 @@ class ScraperService
         ];
     }
 
+    public function sanitizeHtmlForPreview(string $html, string $baseUrl): string
+    {
+        $document = $this->loadDocument($html);
+        $xpath = new \DOMXPath($document);
+
+        foreach ($xpath->query('//script | //iframe | //frame | //frameset | //object | //embed | //applet | //base | //meta') as $element) {
+            $element->parentNode?->removeChild($element);
+        }
+
+        foreach ($xpath->query('//*') as $element) {
+            if (! $element instanceof \DOMElement) {
+                continue;
+            }
+
+            $attributesToRemove = [];
+            foreach ($element->attributes as $attribute) {
+                $name = strtolower($attribute->name);
+                if (str_starts_with($name, 'on') || in_array($name, [
+                    'href',
+                    'xlink:href',
+                    'action',
+                    'formaction',
+                    'poster',
+                    'data',
+                    'srcdoc',
+                ], true)) {
+                    if ($name === 'href'
+                        && $element->localName === 'link'
+                        && in_array('stylesheet', preg_split('/\s+/', strtolower(trim($element->getAttribute('rel')))) ?: [], true)) {
+                        continue;
+                    }
+
+                    $attributesToRemove[] = $attribute->name;
+                } elseif ($name === 'style') {
+                    $element->setAttribute('style', $this->absolutizeCssUrls($attribute->value, $baseUrl));
+                }
+            }
+
+            foreach ($attributesToRemove as $name) {
+                $element->removeAttribute($name);
+            }
+
+            if ($element->localName === 'style') {
+                $element->nodeValue = $this->absolutizeCssUrls($element->textContent, $baseUrl);
+            }
+
+            if ($element->localName === 'link') {
+                $rel = preg_split('/\s+/', strtolower(trim($element->getAttribute('rel')))) ?: [];
+                $stylesheetUrl = in_array('stylesheet', $rel, true)
+                    ? $this->absolutePreviewUrl($element->getAttribute('href'), $baseUrl)
+                    : null;
+
+                if ($stylesheetUrl === null) {
+                    $element->parentNode?->removeChild($element);
+                } else {
+                    $element->setAttribute('href', $stylesheetUrl);
+                }
+            }
+
+            $isImageSource = $element->localName === 'img'
+                || ($element->localName === 'source' && $element->parentElement?->localName === 'picture');
+            if ($isImageSource) {
+                $sourceUrl = $this->absolutePreviewUrl($element->getAttribute('src'), $baseUrl, true);
+                if ($sourceUrl === null) {
+                    $element->removeAttribute('src');
+                } else {
+                    $element->setAttribute('src', $sourceUrl);
+                }
+
+                if ($element->hasAttribute('srcset')) {
+                    $element->setAttribute('srcset', $this->absolutizeSrcset($element->getAttribute('srcset'), $baseUrl));
+                }
+            } else {
+                $element->removeAttribute('src');
+                $element->removeAttribute('srcset');
+            }
+        }
+
+        $head = $document->getElementsByTagName('head')->item(0);
+        if ($head instanceof \DOMElement) {
+            $policy = $document->createElement('meta');
+            $policy->setAttribute('http-equiv', 'Content-Security-Policy');
+            $policy->setAttribute(
+                'content',
+                "default-src 'none'; script-src 'none'; object-src 'none'; connect-src 'none'; img-src http: https: data:; style-src 'unsafe-inline' http: https:; font-src http: https: data:; frame-src 'none'; form-action 'none'; base-uri 'none'",
+            );
+            $head->insertBefore($policy, $head->firstChild);
+        }
+
+        return $document->saveHTML();
+    }
+
+    private function absolutizeCssUrls(string $css, string $baseUrl): string
+    {
+        $css = preg_replace_callback(
+            '/url\(\s*(?:(["\'])(.*?)\1|([^)]*?))\s*\)/is',
+            function (array $match) use ($baseUrl): string {
+                $url = trim($match[2] !== '' ? $match[2] : $match[3]);
+                $absoluteUrl = $this->absolutePreviewUrl($url, $baseUrl, true);
+
+                return $absoluteUrl === null ? 'url("")' : 'url("'.addcslashes($absoluteUrl, '"\\').'")';
+            },
+            $css,
+        ) ?? $css;
+
+        return preg_replace_callback(
+            '/@import\s+(["\'])(.*?)\1/is',
+            function (array $match) use ($baseUrl): string {
+                $absoluteUrl = $this->absolutePreviewUrl(trim($match[2]), $baseUrl);
+
+                return $absoluteUrl === null ? '' : '@import "'.addcslashes($absoluteUrl, '"\\').'"';
+            },
+            $css,
+        ) ?? $css;
+    }
+
+    private function absolutizeSrcset(string $srcset, string $baseUrl): string
+    {
+        preg_match_all('/(?:^|,)\s*(data:[^,\s]+,[^\s]+|[^,\s]+)(?:\s+([^,]+))?/i', $srcset, $matches, PREG_SET_ORDER);
+        $sources = [];
+
+        foreach ($matches as $match) {
+            $absoluteUrl = $this->absolutePreviewUrl($match[1], $baseUrl, true);
+            if ($absoluteUrl !== null) {
+                $sources[] = $absoluteUrl.(isset($match[2]) ? ' '.trim($match[2]) : '');
+            }
+        }
+
+        return implode(', ', $sources);
+    }
+
+    private function absolutePreviewUrl(string $url, string $baseUrl, bool $allowData = false): ?string
+    {
+        $url = trim($url);
+        if ($url === '' || str_starts_with($url, '#')) {
+            return $url === '' ? null : $url;
+        }
+
+        if ($allowData && preg_match('/^data:image\/(?:png|gif|jpe?g|webp|avif|svg\+xml);/i', $url)) {
+            return $url;
+        }
+
+        try {
+            $absoluteUrl = (string) UriResolver::resolve(new Uri($baseUrl), new Uri($url));
+        } catch (InvalidArgumentException) {
+            return null;
+        }
+
+        return in_array(strtolower((string) parse_url($absoluteUrl, PHP_URL_SCHEME)), ['http', 'https'], true)
+            ? $absoluteUrl
+            : null;
+    }
+
     private function selectValue(string $html, string $selector, ?string $attribute): string
     {
         try {
@@ -282,6 +435,9 @@ class ScraperService
                 $predicates[] = '@id='.$this->xpathLiteral($match[1]);
             } elseif (preg_match('/^\.([a-zA-Z_][a-zA-Z0-9_-]*)/', $remaining, $match)) {
                 $predicates[] = 'contains(concat(" ", normalize-space(@class), " "), '.$this->xpathLiteral(' '.$match[1].' ').')';
+            } elseif (preg_match('/^:nth-of-type\(([1-9][0-9]*)\)/', $remaining, $match)) {
+                $siblingTag = $tag === '*' ? '*' : 'local-name()='.$this->xpathLiteral($tag);
+                $predicates[] = '(count(preceding-sibling::*['.$siblingTag.']) + 1) = '.(int) $match[1];
             } elseif (preg_match('/^\[([a-zA-Z_:][a-zA-Z0-9_.:-]*)(?:\s*(=|\*=|\^=|\$=)\s*(?:"([^"]*)"|\'([^\']*)\'|([^\]]+)))?\]/', $remaining, $match)) {
                 $attribute = '@'.$match[1];
                 $operator = $match[2] ?? '';
@@ -301,7 +457,7 @@ class ScraperService
                 throw new InvalidArgumentException('Selector CSS no soportado: '.$compound);
             }
 
-            preg_match('/^(?:#[a-zA-Z_][a-zA-Z0-9_-]*|\.[a-zA-Z_][a-zA-Z0-9_-]*|\[[^\]]+\])/', $remaining, $consumed);
+            preg_match('/^(?::nth-of-type\([1-9][0-9]*\)|#[a-zA-Z_][a-zA-Z0-9_-]*|\.[a-zA-Z_][a-zA-Z0-9_-]*|\[[^\]]+\])/', $remaining, $consumed);
             if (! isset($consumed[0])) {
                 throw new InvalidArgumentException('Selector CSS no válido: '.$compound);
             }

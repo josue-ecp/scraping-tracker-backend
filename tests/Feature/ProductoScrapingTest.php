@@ -43,7 +43,9 @@ class ProductoScrapingTest extends TestCase
             ->assertJsonPath('selectores.titulo.selector', 'h1')
             ->assertJsonPath('selectores.titulo.valor', 'Producto demo')
             ->assertJsonPath('metadatos.tituloDocumento', 'Demo')
-            ->assertJsonPath('html', fn ($html) => str_contains($html, 'product-title'));
+            ->assertJsonPath('html', fn ($html) => str_contains($html, 'product-title'))
+            ->assertJsonPath('htmlPreview', fn ($html) => str_contains($html, 'product-title')
+                && ! str_contains($html, 'https://shop.example/image.jpg'));
 
         Http::assertSentCount(2);
     }
@@ -97,6 +99,52 @@ class ProductoScrapingTest extends TestCase
         ])->assertOk()
             ->assertJsonPath('selectores.titulo.valor', 'Título personalizado')
             ->assertJsonPath('valores.precioOferta', '$30.00');
+    }
+
+    public function test_it_sanitizes_the_preview_html(): void
+    {
+        Http::fake([
+            '*' => Http::response(
+                '<html><head><script>alert(1)</script><style>@import "../css/theme.css";body{background-image:url("../images/bg.png")}</style><link rel="stylesheet" href="/assets/site.css"></head><body><img src="../images/product.jpg" srcset="../images/small.jpg 1x, /images/large.jpg 2x" onerror="alert(1)"><h1 onclick="alert(1)">Producto</h1><img src="javascript:alert(1)"></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+
+        $response = $this->postJson('/api/productos/extraer', [
+            'enlace' => 'https://1.1.1.1/catalog/product',
+        ])->assertOk();
+        $preview = $response->json('htmlPreview');
+        $this->assertStringNotContainsString('<script', $preview);
+        $this->assertStringNotContainsString('onerror', $preview);
+        $this->assertStringNotContainsString('onclick', $preview);
+        $this->assertStringNotContainsString('javascript:', $preview);
+        $this->assertStringContainsString('<style>', $preview);
+        $this->assertStringContainsString('@import "https://1.1.1.1/css/theme.css"', $preview);
+        $this->assertStringContainsString('url("https://1.1.1.1/images/bg.png")', $preview);
+        $this->assertStringContainsString('<link rel="stylesheet" href="https://1.1.1.1/assets/site.css">', $preview);
+        $this->assertStringContainsString('src="https://1.1.1.1/images/product.jpg"', $preview);
+        $this->assertStringContainsString('srcset="https://1.1.1.1/images/small.jpg 1x, https://1.1.1.1/images/large.jpg 2x"', $preview);
+        $this->assertStringContainsString("style-src 'unsafe-inline' http: https:", $preview);
+    }
+
+    public function test_it_extracts_a_unique_nth_of_type_css_selector(): void
+    {
+        Http::fake([
+            '*' => Http::response(
+                '<main><span>Primero</span><span>Segundo</span></main>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+
+        $this->postJson('/api/productos/inspeccionar', [
+            'enlace' => 'https://1.1.1.1/producto',
+            'selectores' => [
+                'titulo' => ['etiqueta' => 'Título', 'selector' => 'main > span:nth-of-type(2)', 'atributo' => null],
+            ],
+        ])->assertOk()
+            ->assertJsonPath('valores.titulo', 'Segundo');
     }
 
     public function test_it_uses_custom_css_selectors_to_record_monitoring_prices(): void

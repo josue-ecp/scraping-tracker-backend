@@ -30,6 +30,7 @@ class AuthenticationTest extends TestCase
         $this->assertTrue(Hash::check('secure-password', $usuario->password));
         $this->assertDatabaseCount('personal_access_tokens', 1);
         $this->assertNotNull($usuario->tokens()->first()->expires_at);
+        $this->assertSame(40, strlen($usuario->api_key));
     }
 
     public function test_a_user_can_login_and_get_their_current_user(): void
@@ -106,5 +107,60 @@ class AuthenticationTest extends TestCase
         ])->assertCreated();
 
         $this->assertSame($usuario->id, Producto::firstOrFail()->user_id);
+    }
+
+    public function test_api_key_endpoint_returns_and_regenerates_the_user_key(): void
+    {
+        $usuario = User::factory()->create();
+        $token = $usuario->createToken('test-token')->plainTextToken;
+        $apiKeyOriginal = $usuario->api_key;
+
+        $this->withToken($token)
+            ->getJson('/api/api-key')
+            ->assertOk()
+            ->assertJsonPath('api_key', $apiKeyOriginal);
+
+        $response = $this->withToken($token)
+            ->postJson('/api/api-key/regenerate')
+            ->assertOk();
+
+        $apiKeyNueva = $response->json('api_key');
+        $this->assertNotSame($apiKeyOriginal, $apiKeyNueva);
+        $this->assertSame($apiKeyNueva, $usuario->fresh()->api_key);
+    }
+
+    public function test_api_key_returns_only_the_owner_products(): void
+    {
+        $usuario = User::factory()->create();
+        $otroUsuario = User::factory()->create();
+
+        Producto::create([
+            'user_id' => $usuario->id,
+            'enlace' => 'https://shop.example/owned',
+            'titulo' => 'Producto propio',
+        ]);
+        Producto::create([
+            'user_id' => $otroUsuario->id,
+            'enlace' => 'https://shop.example/other',
+            'titulo' => 'Producto ajeno',
+        ]);
+
+        $this->getJson('/api/v1/mis-productos', [
+            'X-API-Key' => $usuario->api_key,
+        ])->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('datos.0.titulo', 'Producto propio');
+
+        $this->getJson('/api/v1/mis-productos', [
+            'Authorization' => "Bearer {$usuario->api_key}",
+        ])->assertOk()->assertJsonPath('total', 1);
+    }
+
+    public function test_api_key_endpoint_rejects_missing_or_invalid_keys(): void
+    {
+        $this->getJson('/api/v1/mis-productos')->assertUnauthorized();
+        $this->getJson('/api/v1/mis-productos', [
+            'Authorization' => 'Bearer invalid-key',
+        ])->assertUnauthorized();
     }
 }

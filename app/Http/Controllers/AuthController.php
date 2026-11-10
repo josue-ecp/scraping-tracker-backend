@@ -24,6 +24,7 @@ class AuthController extends Controller
             'email' => strtolower($datos['email']),
             'password' => Hash::make($datos['password']),
         ]);
+        $usuario->asegurarApiKey();
 
         return response()->json([
             'exito' => true,
@@ -45,6 +46,7 @@ class AuthController extends Controller
                 'email' => ['Las credenciales proporcionadas no son válidas.'],
             ]);
         }
+        $usuario->asegurarApiKey();
 
         return response()->json([
             'exito' => true,
